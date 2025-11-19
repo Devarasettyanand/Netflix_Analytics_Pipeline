@@ -1,0 +1,124 @@
+#dim_genome_tags.sql
+WITH src_tags AS (
+    SELECT * FROM {{ ref('src_genome_tags') }}
+)
+
+SELECT
+    tag_id,
+    INITCAP(TRIM(tag)) AS tag_name
+FROM src_tags
+
+#dim_movies.sql
+WITH src_movies AS (
+    SELECT * FROM {{ ref('src_movies') }}
+)
+SELECT
+    movie_id,
+    INITCAP(TRIM(title)) AS movie_title,
+    SPLIT(genres, '|') AS genre_array,
+    genres
+FROM src_movies
+
+
+#dim_movies_with_tags.sql
+{{
+    config(
+        materialized = 'ephemeral'
+    )
+}}
+
+WITH movies AS (
+    SELECT * FROM {{ ref("dim_movies") }}
+),
+tags AS (
+    SELECT * FROM {{ ref("dim_genome_tags") }}
+),
+scores AS (
+    SELECT * FROM {{ ref("fct_genome_scores") }}
+)
+
+SELECT
+    m.movie_id,
+    m.movie_title,
+    m.genres,
+    t.tag_name,
+    s.relevance_score
+FROM movies m
+LEFT JOIN scores s ON m.movie_id = s.movie_id
+LEFT JOIN tags t ON t.tag_id = s.tag_id
+
+
+#dim_users.sql
+WITH ratings AS (
+  SELECT DISTINCT user_id FROM {{ ref('src_ratings') }}
+),
+
+tags AS (
+  SELECT DISTINCT user_id FROM {{ ref('src_tags') }}
+)
+
+SELECT DISTINCT user_id
+FROM (
+  SELECT * FROM ratings
+  UNION
+  SELECT * FROM tags
+)
+
+
+#fct_genome_scores.sql
+WITH src_scores AS (
+    SELECT * FROM {{ ref('src_genome_score') }}
+)
+
+SELECT
+    movie_id,
+    tag_id,
+    ROUND(relevance, 4) AS relevance_score
+FROM src_scores
+WHERE relevance > 0
+
+
+#fct_ratings.sql
+{{
+  config(
+    materialized = 'incremental',
+    on_schema_change='fail'
+  )
+}}
+
+WITH src_ratings AS (
+  SELECT * FROM {{ ref('src_ratings') }}
+)
+
+SELECT
+  user_id,
+  movie_id,
+  rating,
+  rating_timestamp
+FROM src_ratings
+WHERE rating IS NOT NULL
+
+{% if is_incremental() %}
+  AND rating_timestamp > (SELECT MAX(rating_timestamp) FROM {{ this }})
+{% endif %}
+
+
+#mart
+{{ config(materialized = 'table') }}
+
+WITH fct_ratings AS (
+    SELECT * FROM {{ ref('fct_ratings') }}
+),
+seed_dates AS (
+    SELECT * FROM {{ ref('seed_movie_release_dates') }}
+)
+
+SELECT 
+    f.*,
+    CASE
+        WHEN d.release_date IS NULL THEN 'unknown'
+        ELSE 'known'
+    END AS release_info_available
+FROM fct_ratings f
+LEFT JOIN seed_dates d
+ON f.movie_id = d.movie_id
